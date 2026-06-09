@@ -1,25 +1,27 @@
 """
-SISTEMA IDS INSTITUCIONAL
-Descripción: Sistema de Detección de Intrusos (IDS) basado en consola.
+SISTEMA IDS INSTITUCIONAL (Versión GUI)
+Descripción: Sistema de Detección de Intrusos (IDS) con Interfaz Gráfica.
 Intercepta tráfico de red analizando la Capa 2 (MAC), Capa 3 (IP) y Capa 7 (DNS).
 Incluye integración de Threat Intelligence (Whois) y envío de alertas por correo en formato HTML.
 """
 
 import os
+import sys
+import re
 import json
 import smtplib
+import threading
+import tkinter as tk
+from tkinter import scrolledtext, messagebox
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 
-# Librerías de red y forenses
 from scapy.all import sniff, IP, Ether, DNSQR
 from ipwhois import IPWhois
 
-# ==========================================
-# CONFIGURACIÓN DE INTERFAZ Y COLORES ANSI
-# ==========================================
+# [Índice 1]
 class Color:
     CYAN = '\033[96m'
     GREEN = '\033[92m'
@@ -28,34 +30,32 @@ class Color:
     BOLD = '\033[1m'
     RESET = '\033[0m'
 
-# ==========================================
-# CARGA DE VARIABLES DE ENTORNO (SEGURIDAD)
-# ==========================================
-load_dotenv()
+ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
+# [Índice 2]
+load_dotenv()
 SMTP_SERVER = os.getenv("SMTP_SERVER")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 SENDER_EMAIL = os.getenv("SENDER_EMAIL")
 SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
 
-# ==========================================
-# VARIABLES DE ESTADO Y CACHÉ
-# ==========================================
+# [Índice 3]
 alertas_enviadas_ip = set()
 alertas_enviadas_mac = set()
 alertas_malware = set()
+ids_corriendo = False
 
+# [Índice 4]
 def cargar_whitelist():
-    """Lee el archivo JSON que contiene las IPs y MACs autorizadas (Capa 2 y 3)."""
     try:
         with open("whitelist.json", "r") as f:
             return json.load(f)
     except FileNotFoundError:
         return {"ips_permitidas": [], "macs_permitidas": []}
 
+# [Índice 5]
 def cargar_blacklist():
-    """Lee el archivo de texto con las IPs asociadas a Malware/Botnets."""
     try:
         with open("blacklist.txt", "r") as f:
             return [line.strip() for line in f if line.strip()]
@@ -65,17 +65,14 @@ def cargar_blacklist():
 WHITELIST = cargar_whitelist()
 BLACKLIST = cargar_blacklist()
 
+# [Índice 6]
 def enviar_alerta(asunto, mensaje_html):
-    """Función centralizada para enviar correos electrónicos en formato HTML."""
     try:
         destinatarios = [email.strip() for email in ADMIN_EMAIL.split(',')]
-        
         msg = MIMEMultipart()
         msg['From'] = f"Sistema IDS Institucional <{SENDER_EMAIL}>"
         msg['To'] = ", ".join(destinatarios)
         msg['Subject'] = asunto
-        
-        # Inyectar el formato HTML
         msg.attach(MIMEText(mensaje_html, 'html'))
 
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
@@ -83,17 +80,16 @@ def enviar_alerta(asunto, mensaje_html):
         server.login(SENDER_EMAIL, SENDER_PASSWORD)
         server.sendmail(SENDER_EMAIL, destinatarios, msg.as_string())
         server.quit()
-        print(f"{Color.GREEN}[+] Correo de alerta (HTML) enviado exitosamente a {len(destinatarios)} destinatario(s).{Color.RESET}")
+        print(f"{Color.GREEN}[+] Correo de alerta (HTML) enviado a {len(destinatarios)} destinatario(s).{Color.RESET}")
     except Exception as e:
         print(f"{Color.RED}[-] Error enviando correo: {e}{Color.RESET}")
 
+# [Índice 7]
 def ejecutar_analisis_forense(ip_peligrosa, ip_interna):
-    """Módulo de Automatización Forense con diseño de correo HTML Crítico."""
     print(f"{Color.YELLOW}[*] Iniciando análisis automatizado Whois para {ip_peligrosa}...{Color.RESET}")
     try:
         obj = IPWhois(ip_peligrosa)
         resultados = obj.lookup_rdap()
-        
         asn_description = resultados.get('asn_description', 'Desconocido')
         entidades = resultados.get('objects')
         contactos_abuso = []
@@ -112,10 +108,8 @@ def ejecutar_analisis_forense(ip_peligrosa, ip_interna):
                         contactos_abuso.append(emails['value'])
         
         correos_str = ", ".join(set(contactos_abuso)) if contactos_abuso else "No listado públicamente"
-
         asunto = f"🚨 EMERGENCIA CRÍTICA: Riesgo Botnet detectado - IP {ip_peligrosa}"
         
-        # Plantilla HTML en Rojo para Emergencias
         cuerpo_html = f"""
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #fca5a5; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
             <div style="background-color: #dc2626; color: white; padding: 15px; text-align: center;">
@@ -144,34 +138,28 @@ def ejecutar_analisis_forense(ip_peligrosa, ip_interna):
         </div>
         """
         enviar_alerta(asunto, cuerpo_html)
-        print(f"{Color.GREEN}[!] Análisis forense completado y enviado al administrador.{Color.RESET}")
+        print(f"{Color.GREEN}[!] Análisis forense completado.{Color.RESET}")
     except Exception as e:
-        print(f"{Color.RED}[-] Error en el análisis forense: {e}{Color.RESET}")
+        print(f"{Color.RED}[-] Error forense: {e}{Color.RESET}")
 
+# [Índice 8]
 def procesar_paquete(paquete):
-    """Función de Callback de Scapy: Se ejecuta por CADA paquete interceptado."""
-    
-    # 1. Monitoreo DNS (Capa 7)
     if paquete.haslayer(DNSQR):
         dominio = paquete[DNSQR].qname.decode('utf-8')
         ip_origen = paquete[IP].src if paquete.haslayer(IP) else "Desconocida"
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         with open("sitios_visitados.log", "a") as f:
             f.write(f"[{timestamp}] IP: {ip_origen} solicitó: {dominio}\n")
         print(f"{Color.CYAN}[DNS LOG] {ip_origen} -> {dominio}{Color.RESET}")
 
-    # 2. Threat Intelligence (Conexiones salientes)
     if paquete.haslayer(IP):
         ip_destino = paquete[IP].dst
         ip_origen = paquete[IP].src
-        
         if ip_destino in BLACKLIST and ip_destino not in alertas_malware:
-            print(f"\n{Color.RED}{Color.BOLD}[!!!] THREAT INTEL: Conexión a IP maliciosa detectada: {ip_destino}{Color.RESET}")
+            print(f"\n{Color.RED}{Color.BOLD}[!!!] THREAT INTEL: Conexión a IP maliciosa: {ip_destino}{Color.RESET}")
             alertas_malware.add(ip_destino)
-            ejecutar_analisis_forense(ip_destino, ip_origen)
+            threading.Thread(target=ejecutar_analisis_forense, args=(ip_destino, ip_origen), daemon=True).start()
 
-    # 3. Listas Blancas de Capa 2 (Direcciones MAC)
     if paquete.haslayer(Ether):
         mac_origen = paquete[Ether].src
         if mac_origen not in WHITELIST.get("macs_permitidas", []) and mac_origen not in alertas_enviadas_mac:
@@ -189,10 +177,9 @@ def procesar_paquete(paquete):
                     </div>
                 </div>
                 """
-                enviar_alerta("⚠️ IDS Alerta: Nueva MAC Detectada", html_mac)
+                threading.Thread(target=enviar_alerta, args=("⚠️ IDS Alerta: Nueva MAC Detectada", html_mac), daemon=True).start()
                 alertas_enviadas_mac.add(mac_origen)
 
-    # 4. Listas Blancas de Capa 3 (Direcciones IP)
     if paquete.haslayer(IP):
         ip_origen = paquete[IP].src
         if ip_origen not in WHITELIST.get("ips_permitidas", []) and ip_origen not in alertas_enviadas_ip and ip_origen not in BLACKLIST:
@@ -209,83 +196,152 @@ def procesar_paquete(paquete):
                 </div>
             </div>
             """
-            enviar_alerta("⚠️ IDS Alerta: Nueva IP Detectada", html_ip)
+            threading.Thread(target=enviar_alerta, args=("⚠️ IDS Alerta: Nueva IP Detectada", html_ip), daemon=True).start()
             alertas_enviadas_ip.add(ip_origen)
 
-def mostrar_menu():
-    """Despliega la interfaz interactiva principal para el control del sistema."""
-    global WHITELIST, BLACKLIST, SMTP_SERVER, SMTP_PORT, SENDER_EMAIL, SENDER_PASSWORD, ADMIN_EMAIL
-    
-    while True:
-        os.system('clear')
-        print(f"{Color.CYAN}{Color.BOLD}")
-        print(r"""
-      _____ _____   _____ 
-     |_   _|  __ \ / ____|
-       | | | |  | | (___  
-       | | | |  | |\___ \ 
-      _| |_| |__| |____) |
-     |_____|_____/|_____/ 
-     --- INSTITUCIONAL ---
-        """)
-        print(f"{Color.RESET}")
-        print(f"{Color.YELLOW}╔═══════════════════════════════════════════════════╗{Color.RESET}")
-        print(f"{Color.YELLOW}║{Color.RESET} {Color.BOLD}Panel de Control Principal{Color.RESET}                        {Color.YELLOW}║{Color.RESET}")
-        print(f"{Color.YELLOW}╠═══════════════════════════════════════════════════╣{Color.RESET}")
-        print(f"{Color.YELLOW}║{Color.RESET} {Color.GREEN}[1]{Color.RESET} Iniciar Motor de Monitoreo (IDS)              {Color.YELLOW}║{Color.RESET}")
-        print(f"{Color.YELLOW}║{Color.RESET} {Color.GREEN}[2]{Color.RESET} Ver / Editar Lista Blanca (Capa 2 y 3)        {Color.YELLOW}║{Color.RESET}")
-        print(f"{Color.YELLOW}║{Color.RESET} {Color.GREEN}[3]{Color.RESET} Ver / Editar Lista Negra (Threat Intel)       {Color.YELLOW}║{Color.RESET}")
-        print(f"{Color.YELLOW}║{Color.RESET} {Color.GREEN}[4]{Color.RESET} Ver Bitácora de Tráfico DNS                   {Color.YELLOW}║{Color.RESET}")
-        print(f"{Color.YELLOW}║{Color.RESET} {Color.GREEN}[5]{Color.RESET} Editar Correos de Alerta (.env)               {Color.YELLOW}║{Color.RESET}")
-        print(f"{Color.YELLOW}║{Color.RESET} {Color.RED}[6]{Color.RESET} Salir del Sistema                             {Color.YELLOW}║{Color.RESET}")
-        print(f"{Color.YELLOW}╚═══════════════════════════════════════════════════╝{Color.RESET}")
+# [Índice 9]
+class RedireccionadorConsola:
+    def __init__(self, widget_texto):
+        self.widget_texto = widget_texto
+
+    def write(self, mensaje):
+        mensaje_limpio = ansi_escape.sub('', mensaje)
+        self.widget_texto.insert(tk.END, mensaje_limpio)
+        self.widget_texto.see(tk.END)
+
+    def flush(self):
+        pass
+
+# [Índice 10]
+class AplicacionIDS:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Sistema IDS Institucional - Panel de Control")
+        self.root.geometry("900x600")
+        self.root.configure(bg="#1e1e1e")
+
+        titulo = tk.Label(root, text="🛡️ SISTEMA IDS INSTITUCIONAL", font=("Helvetica", 16, "bold"), bg="#005f73", fg="white", pady=10)
+        titulo.pack(fill=tk.X)
+
+        main_frame = tk.Frame(root, bg="#1e1e1e")
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        panel_botones = tk.Frame(main_frame, bg="#2d2d2d", width=250)
+        panel_botones.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+
+        self.consola = scrolledtext.ScrolledText(main_frame, bg="#0d1117", fg="#00ff00", font=("Consolas", 10))
+        self.consola.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         
-        opcion = input(f"\n{Color.CYAN}root@ids-institucional:~# {Color.RESET}")
+        sys.stdout = RedireccionadorConsola(self.consola)
+        sys.stderr = RedireccionadorConsola(self.consola)
+
+        self.btn_iniciar = tk.Button(panel_botones, text="▶ Iniciar Monitoreo IDS", bg="#2a9d8f", fg="white", font=("Arial", 11, "bold"), command=self.iniciar_ids)
+        self.btn_iniciar.pack(fill=tk.X, padx=10, pady=15)
+
+        self.btn_detener = tk.Button(panel_botones, text="⏹ Detener Monitoreo", bg="#e76f51", fg="white", font=("Arial", 11, "bold"), command=self.detener_ids, state=tk.DISABLED)
+        self.btn_detener.pack(fill=tk.X, padx=10, pady=5)
+
+        tk.Label(panel_botones, text="Configuración:", bg="#2d2d2d", fg="white", font=("Arial", 10, "bold")).pack(pady=(20, 5))
+
+        tk.Button(panel_botones, text="📝 Editar Lista Blanca", command=lambda: self.abrir_editor("whitelist.json")).pack(fill=tk.X, padx=10, pady=5)
+        tk.Button(panel_botones, text="📝 Editar Lista Negra", command=lambda: self.abrir_editor("blacklist.txt")).pack(fill=tk.X, padx=10, pady=5)
+        tk.Button(panel_botones, text="📧 Editar Correos (.env)", command=lambda: self.abrir_editor(".env")).pack(fill=tk.X, padx=10, pady=5)
         
-        if opcion == '1':
-            print(f"\n{Color.GREEN}[*] Iniciando Motor IDS...{Color.RESET}")
-            print(f"{Color.GREEN}[*] Módulos L2/L3, DNS y Forense: ACTIVOS{Color.RESET}")
-            print(f"{Color.YELLOW}[*] Escuchando red (Presiona Ctrl+C para detener)...{Color.RESET}\n")
-            try:
-                sniff(prn=procesar_paquete, store=False)
-            except KeyboardInterrupt:
-                print(f"\n{Color.RED}[!] Motor IDS detenido por el administrador.{Color.RESET}")
-                input(f"{Color.CYAN}Presiona Enter para volver al menú...{Color.RESET}")
+        tk.Button(panel_botones, text="📄 Ver Logs DNS", bg="#457b9d", fg="white", command=self.ver_logs).pack(fill=tk.X, padx=10, pady=25)
+
+        print("[*] Sistema Inicializado. Listo para operar.")
+
+    # [Índice 11]
+    def iniciar_ids(self):
+        global ids_corriendo
+        ids_corriendo = True
+        self.btn_iniciar.config(state=tk.DISABLED)
+        self.btn_detener.config(state=tk.NORMAL)
+        print("\n[*] Iniciando Motor IDS...")
+        print("[*] Escuchando red (Modo Interfaz Gráfica)...")
+        
+        self.hilo_sniff = threading.Thread(target=self.hilo_scapy)
+        self.hilo_sniff.daemon = True
+        self.hilo_sniff.start()
+
+    # [Índice 12]
+    def detener_ids(self):
+        global ids_corriendo
+        ids_corriendo = False
+        self.btn_iniciar.config(state=tk.NORMAL)
+        self.btn_detener.config(state=tk.DISABLED)
+        print("[!] Motor IDS detenido por el administrador.")
+
+    # [Índice 13]
+    def hilo_scapy(self):
+        sniff(prn=procesar_paquete, store=False, stop_filter=lambda x: not ids_corriendo)
+
+    # [Índice 14]
+    def abrir_editor(self, archivo):
+        if not os.path.exists(archivo):
+            open(archivo, 'w').close()
+            
+        ventana_editor = tk.Toplevel(self.root)
+        ventana_editor.title(f"Editando: {archivo}")
+        ventana_editor.geometry("600x400")
+
+        texto = scrolledtext.ScrolledText(ventana_editor, font=("Consolas", 11))
+        texto.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        with open(archivo, "r") as f:
+            texto.insert(tk.END, f.read())
+
+        def guardar():
+            with open(archivo, "w") as f:
+                f.write(texto.get("1.0", tk.END).strip())
+            
+            global WHITELIST, BLACKLIST, SMTP_SERVER, SMTP_PORT, SENDER_EMAIL, SENDER_PASSWORD, ADMIN_EMAIL
+            if archivo == "whitelist.json":
+                WHITELIST = cargar_whitelist()
+            elif archivo == "blacklist.txt":
+                BLACKLIST = cargar_blacklist()
+            elif archivo == ".env":
+                load_dotenv(override=True)
+                SMTP_SERVER = os.getenv("SMTP_SERVER")
+                SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+                SENDER_EMAIL = os.getenv("SENDER_EMAIL")
+                SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
+                ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
                 
-        elif opcion == '2':
-            os.system('nano whitelist.json')
-            WHITELIST = cargar_whitelist()
-            print(f"{Color.GREEN}[+] Lista Blanca recargada en memoria.{Color.RESET}")
+            print(f"[+] Archivo {archivo} guardado y recargado en memoria.")
+            ventana_editor.destroy()
+
+        tk.Button(ventana_editor, text="Guardar Cambios", bg="#2a9d8f", fg="white", font=("Arial", 10, "bold"), command=guardar).pack(pady=10)
+
+    # [Índice 15]
+    def ver_logs(self):
+        try:
+            with open("sitios_visitados.log", "r") as f:
+                lineas = f.readlines()[-20:]
             
-        elif opcion == '3':
-            os.system('nano blacklist.txt')
-            BLACKLIST = cargar_blacklist()
-            print(f"{Color.GREEN}[+] Lista Negra recargada en memoria.{Color.RESET}")
+            ventana_logs = tk.Toplevel(self.root)
+            ventana_logs.title("Últimos 20 Registros DNS")
+            ventana_logs.geometry("700x300")
             
-        elif opcion == '4':
-            os.system('clear')
-            print(f"{Color.BOLD}{Color.CYAN}--- ÚLTIMOS 20 REGISTROS DE NAVEGACIÓN DNS ---{Color.RESET}")
-            os.system('tail -n 20 sitios_visitados.log')
-            print(f"{Color.BOLD}{Color.CYAN}----------------------------------------------{Color.RESET}")
-            input(f"\n{Color.YELLOW}Presiona Enter para volver al menú...{Color.RESET}")
-            
-        elif opcion == '5':
-            os.system('nano .env')
-            load_dotenv(override=True)
-            SMTP_SERVER = os.getenv("SMTP_SERVER")
-            SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-            SENDER_EMAIL = os.getenv("SENDER_EMAIL")
-            SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
-            ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
-            print(f"{Color.GREEN}[+] Archivo .env actualizado. Credenciales recargadas.{Color.RESET}")
-            input(f"\n{Color.YELLOW}Presiona Enter para continuar...{Color.RESET}")
-            
-        elif opcion == '6':
-            print(f"\n{Color.RED}Apagando Sistema IDS Institucional. ¡Hasta pronto!{Color.RESET}\n")
-            break
-            
-        else:
-            input(f"\n{Color.RED}Opción no válida. Presiona Enter para intentar de nuevo...{Color.RESET}")
+            texto = scrolledtext.ScrolledText(ventana_logs, bg="black", fg="#00ff00", font=("Consolas", 10))
+            texto.pack(fill=tk.BOTH, expand=True)
+            texto.insert(tk.END, "".join(lineas))
+            texto.config(state=tk.DISABLED)
+        except FileNotFoundError:
+            messagebox.showerror("Error", "Aún no hay registros de navegación.")
 
 if __name__ == "__main__":
-    mostrar_menu()
+    if os.geteuid() != 0:
+        print("ERROR: El IDS necesita ejecutarse con 'sudo' para interceptar la red.")
+        sys.exit(1)
+        
+    root = tk.Tk()
+    app = AplicacionIDS(root)
+    
+    def on_closing():
+        global ids_corriendo
+        ids_corriendo = False
+        root.destroy()
+        
+    root.protocol("WM_DELETE_WINDOW", on_closing)
+    root.mainloop()
